@@ -293,7 +293,7 @@ Proyek ini dilisensikan di bawah lisensi MIT. Lihat file LICENSE untuk informasi
 ## Kontak
 
 Untuk pertanyaan atau dukungan, silakan hubungi:
-- Email: [email@example.com]
+- Email: [asepsupriatna1990@gmail.com]
 - Website: [www.example.com]
 
 ---
