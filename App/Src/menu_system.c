@@ -1,7 +1,7 @@
- /**
+/**
   ******************************************************************************
   * @file           : menu_system.c
-  * @brief          : Menu navigation and display implementation for Audio Crossover 
+  * @brief          : Menu System implementation
   * @author         : Audio Crossover Project
   ******************************************************************************
   * @attention
@@ -21,763 +21,1540 @@
 #include "lcd_driver.h"
 #include "button_handler.h"
 #include "rotary_encoder.h"
-#include "ui_manager.h"
 #include "audio_preset.h"
 #include "crossover.h"
 #include "compressor.h"
 #include "limiter.h"
 #include "delay.h"
+#include "ui_manager.h"
 #include "factory_presets.h"
 #include "preset_manager.h"
 
-/* Private define ------------------------------------------------------------*/
-#define MAX_MENU_ITEMS          10  // Maximum number of items in a single menu
-#define MAX_MENU_DEPTH          5   // Maximum depth of nested menus
-#define SCROLL_TIMEOUT          500 // ms before scrolling long text
-#define SCROLL_SPEED            300 // ms between each scroll step
+/* Private defines ------------------------------------------------------------*/
+#define MAX_MENU_DEPTH           5
+#define MAX_MENU_ITEMS          10
+#define MENU_DISPLAY_ROWS        2
+#define MENU_TITLE_ROW           0
+#define MENU_ITEM_ROW            1
+#define MENU_CURSOR              ">"
+#define MENU_ITEM_MAX_LENGTH    15
 
-/* Private typedef -----------------------------------------------------------*/
-typedef enum {
-  MENU_STATE_BROWSING,          // Browsing menu items
-  MENU_STATE_EDITING,           // Editing a parameter
-  MENU_STATE_CONFIRM,           // Confirmation screen
-  MENU_STATE_MESSAGE            // Message display
-} MenuState_t;
+/* Crossover band definitions */
+#define BAND_SUB                 0
+#define BAND_LOW                 1
+#define BAND_MID                 2
+#define BAND_HIGH                3
+#define MAX_BANDS                4
 
-typedef enum {
-  MENU_ACTION_NONE,             // No action
-  MENU_ACTION_SELECT,           // Select current item
-  MENU_ACTION_BACK,             // Go back to previous menu
-  MENU_ACTION_EDIT,             // Edit a parameter
-  MENU_ACTION_SAVE,             // Save a parameter
-  MENU_ACTION_CANCEL            // Cancel editing
-} MenuAction_t;
+/* Menu states */
+#define MENU_STATE_BROWSING      0
+#define MENU_STATE_EDITING       1
+#define MENU_STATE_CONFIRMATION  2
 
+/* Confirmation options */
+#define CONFIRM_YES              0
+#define CONFIRM_NO               1
+
+/* Private macros -------------------------------------------------------------*/
+#define MIN(a,b) (((a)<(b))?(a):(b))
+#define MAX(a,b) (((a)>(b))?(a):(b))
+
+/* Private types -------------------------------------------------------------*/
+/**
+  * @brief Menu item structure
+  */
 typedef struct {
-  char* name;                   // Menu item name
-  void (*callback)(void);       // Function to call when selected
-  void* parameter;              // Parameter to edit
-  float minValue;               // Minimum value for parameter
-  float maxValue;               // Maximum value for parameter
-  float step;                   // Step size for parameter adjustment
-  char* unit;                   // Unit for parameter (Hz, dB, ms, etc.)
-  uint8_t decimalPlaces;        // Number of decimal places to display
+    char text[MENU_ITEM_MAX_LENGTH + 1];
+    uint8_t id;
+    void (*callback)(uint8_t);
 } MenuItem_t;
 
+/**
+  * @brief Menu structure
+  */
 typedef struct {
-  char* title;                  // Menu title
-  MenuItem_t items[MAX_MENU_ITEMS]; // Menu items
-  uint8_t numItems;             // Number of items in this menu
-  uint8_t currentItem;          // Currently selected item
-  uint8_t scrollPosition;       // Scroll position for long menus
+    char title[MENU_ITEM_MAX_LENGTH + 1];
+    MenuItem_t items[MAX_MENU_ITEMS];
+    uint8_t numItems;
+    uint8_t currentItem;
+    uint8_t topDisplayedItem;
 } Menu_t;
 
+/**
+  * @brief Parameter edit structure
+  */
+typedef struct {
+    char name[MENU_ITEM_MAX_LENGTH + 1];
+    int32_t value;
+    int32_t minValue;
+    int32_t maxValue;
+    int32_t step;
+    int32_t originalValue;
+    uint8_t precision;        // Number of decimal places to display
+    uint8_t paramId;
+    uint8_t moduleId;
+    uint8_t bandId;
+    void (*updateCallback)(uint8_t, uint8_t, int32_t);
+} Parameter_t;
+
 /* Private variables ---------------------------------------------------------*/
-static Menu_t menuStack[MAX_MENU_DEPTH];  // Stack of menus for navigation
-static uint8_t menuDepth = 0;             // Current depth in menu stack
-static MenuState_t menuState = MENU_STATE_BROWSING; // Current menu state
-static float editValue;                   // Value being edited
-static char messageText[32];              // Text for message display
-static uint32_t messageTimeout = 0;       // Timeout for message display
-static uint32_t lastScrollTime = 0;       // Last time menu text was scrolled
-static uint8_t textScrollPos = 0;         // Text scroll position for long items
+static Menu_t menuStack[MAX_MENU_DEPTH];
+static uint8_t menuDepth = 0;
+static uint8_t menuState = MENU_STATE_BROWSING;
+static Parameter_t currentParameter;
+static uint8_t confirmationOption = CONFIRM_NO;
+static uint8_t confirmationAction = 0;
+static uint8_t selectedPreset = 0;
 
-// Forward declarations of menu creation functions
-static void CreateMainMenu(void);
-static void CreateCrossoverMenu(void);
-static void CreateCrossoverBandMenu(uint8_t band);
-static void CreateCompressorMenu(void);
-static void CreateLimiterMenu(void);
-static void CreateDelayMenu(void);
-static void CreatePresetsMenu(void);
-static void CreateSystemMenu(void);
+/* Forward declarations of menu builders */
+static void BuildMainMenu(void);
+static void BuildCrossoverMenu(void);
+static void BuildCrossoverBandMenu(uint8_t band);
+static void BuildCompressorMenu(void);
+static void BuildLimiterMenu(void);
+static void BuildDelayPhaseMenu(void);
+static void BuildDelayBandMenu(uint8_t band);
+static void BuildPhaseBandMenu(uint8_t band);
+static void BuildPresetMenu(void);
+static void BuildLoadPresetMenu(void);
+static void BuildSavePresetMenu(void);
 
-// Forward declarations of menu callback functions
-static void ShowCrossoverMenu(void);
-static void ShowCrossoverBandMenu(void);
-static void ShowCompressorMenu(void);
-static void ShowLimiterMenu(void);
-static void ShowDelayMenu(void);
-static void ShowPresetsMenu(void);
-static void ShowSystemMenu(void);
-static void LoadPreset(void);
-static void SavePreset(void);
-static void ResetSettings(void);
-static void ShowAbout(void);
+/* Forward declarations of menu callbacks */
+static void MainMenuCallback(uint8_t itemId);
+static void CrossoverMenuCallback(uint8_t itemId);
+static void CrossoverBandMenuCallback(uint8_t itemId);
+static void CompressorMenuCallback(uint8_t itemId);
+static void LimiterMenuCallback(uint8_t itemId);
+static void DelayPhaseMenuCallback(uint8_t itemId);
+static void DelayBandMenuCallback(uint8_t itemId);
+static void PhaseBandMenuCallback(uint8_t itemId);
+static void PresetMenuCallback(uint8_t itemId);
+static void LoadPresetMenuCallback(uint8_t itemId);
+static void SavePresetMenuCallback(uint8_t itemId);
 
-/* Private function prototypes -----------------------------------------------*/
-static void Menu_DrawCurrentMenu(void);
-static void Menu_HandleInput(MenuAction_t action, int16_t value);
-static void Menu_UpdateEditValue(int16_t direction);
-static void Menu_FormatParameterValue(char* buffer, float value, uint8_t decimalPlaces, char* unit);
-static void Menu_ShowConfirmation(char* message, void (*confirmCallback)(void));
-static void Menu_ShowMessage(char* message, uint32_t timeout);
-static void Menu_NavigateBack(void);
+/* Forward declarations of parameter editing functions */
+static void EditParameter(const char* name, int32_t value, int32_t minValue, int32_t maxValue, 
+                          int32_t step, uint8_t precision, uint8_t moduleId, uint8_t paramId, uint8_t bandId,
+                          void (*updateCallback)(uint8_t, uint8_t, int32_t));
+static void DisplayParameterEdit(void);
+static void ApplyParameterEdit(void);
+static void CancelParameterEdit(void);
+
+/* Forward declarations of confirmation functions */
+static void ShowConfirmation(const char* message, uint8_t action);
+static void HandleConfirmation(void);
+
+/* Forward declarations of parameter update callbacks */
+static void UpdateCrossoverParameter(uint8_t band, uint8_t paramId, int32_t value);
+static void UpdateCompressorParameter(uint8_t band, uint8_t paramId, int32_t value);
+static void UpdateLimiterParameter(uint8_t band, uint8_t paramId, int32_t value);
+static void UpdateDelayParameter(uint8_t band, uint8_t paramId, int32_t value);
+static void UpdatePhaseParameter(uint8_t band, uint8_t paramId, int32_t value);
+
+/* Menu IDs for main menu */
+#define MENU_MAIN_CROSSOVER      0
+#define MENU_MAIN_COMPRESSOR     1
+#define MENU_MAIN_LIMITER        2
+#define MENU_MAIN_DELAY_PHASE    3
+#define MENU_MAIN_PRESETS        4
+#define MENU_MAIN_ABOUT          5
+
+/* Menu IDs for crossover menu */
+#define MENU_CROSSOVER_SUB       0
+#define MENU_CROSSOVER_LOW       1
+#define MENU_CROSSOVER_MID       2
+#define MENU_CROSSOVER_HIGH      3
+
+/* Menu IDs for compressor menu */
+#define MENU_COMPRESSOR_THRESHOLD    0
+#define MENU_COMPRESSOR_RATIO        1
+#define MENU_COMPRESSOR_ATTACK       2
+#define MENU_COMPRESSOR_RELEASE      3
+#define MENU_COMPRESSOR_MAKEUP       4
+
+/* Menu IDs for limiter menu */
+#define MENU_LIMITER_THRESHOLD       0
+#define MENU_LIMITER_RELEASE         1
+
+/* Menu IDs for delay/phase menu */
+#define MENU_DELAY_PHASE_SUB_DELAY   0
+#define MENU_DELAY_PHASE_LOW_DELAY   1
+#define MENU_DELAY_PHASE_MID_DELAY   2
+#define MENU_DELAY_PHASE_HIGH_DELAY  3
+#define MENU_DELAY_PHASE_SUB_PHASE   4
+#define MENU_DELAY_PHASE_LOW_PHASE   5
+#define MENU_DELAY_PHASE_MID_PHASE   6
+#define MENU_DELAY_PHASE_HIGH_PHASE  7
+
+/* Menu IDs for preset menu */
+#define MENU_PRESET_LOAD             0
+#define MENU_PRESET_SAVE             1
+
+/* Confirmation action IDs */
+#define CONFIRM_ACTION_SAVE_PRESET   0
+#define CONFIRM_ACTION_LOAD_PRESET   1
+
+/* Module IDs for parameter editing */
+#define MODULE_CROSSOVER             0
+#define MODULE_COMPRESSOR            1
+#define MODULE_LIMITER               2
+#define MODULE_DELAY                 3
+#define MODULE_PHASE                 4
+
+/* Parameter IDs for crossover */
+#define PARAM_CROSSOVER_FREQUENCY    0
+#define PARAM_CROSSOVER_TYPE         1
+#define PARAM_CROSSOVER_GAIN         2
+#define PARAM_CROSSOVER_MUTE         3
+
+/* Parameter IDs for compressor */
+#define PARAM_COMPRESSOR_THRESHOLD   0
+#define PARAM_COMPRESSOR_RATIO       1
+#define PARAM_COMPRESSOR_ATTACK      2
+#define PARAM_COMPRESSOR_RELEASE     3
+#define PARAM_COMPRESSOR_MAKEUP      4
+
+/* Parameter IDs for limiter */
+#define PARAM_LIMITER_THRESHOLD      0
+#define PARAM_LIMITER_RELEASE        1
+
+/* Parameter IDs for delay */
+#define PARAM_DELAY_TIME             0
+
+/* Parameter IDs for phase */
+#define PARAM_PHASE_INVERT           0
 
 /**
-  * @brief  Initialize the menu system
+  * @brief  Initialize menu system
   * @retval None
   */
 void Menu_Init(void)
 {
-  // Initialize menu stack with main menu
-  menuDepth = 0;
-  menuState = MENU_STATE_BROWSING;
-  CreateMainMenu();
-}
-
-/**
-  * @brief  Process menu system update
-  * @retval None
-  */
-void Menu_Update(void)
-{
-  static uint32_t lastUpdateTime = 0;
-  uint32_t currentTime = HAL_GetTick();
-  
-  // Handle message timeout
-  if (menuState == MENU_STATE_MESSAGE && currentTime > messageTimeout) {
+    /* Reset menu state */
+    menuDepth = 0;
     menuState = MENU_STATE_BROWSING;
-    Menu_DrawCurrentMenu();
-  }
-  
-  // Handle text scrolling for long menu items
-  if (menuState == MENU_STATE_BROWSING && currentTime - lastScrollTime > SCROLL_SPEED) {
-    Menu_t* currentMenu = &menuStack[menuDepth];
-    MenuItem_t* currentItem = &currentMenu->items[currentMenu->currentItem];
     
-    // Only scroll if item name is longer than display width
-    if (currentItem && strlen(currentItem->name) > 15) {
-      textScrollPos++;
-      if (textScrollPos > strlen(currentItem->name) - 15) {
-        textScrollPos = 0;
-        lastScrollTime = currentTime + SCROLL_TIMEOUT; // Pause before starting again
-      } else {
-        lastScrollTime = currentTime;
-      }
-      
-      // Update only the second line to avoid flicker
-      LCD_SetCursor(0, 1);
-      LCD_Print("                "); // Clear line
-      LCD_SetCursor(0, 1);
-      LCD_Print(&currentItem->name[textScrollPos]);
-    }
-  }
+    /* Build initial main menu */
+    BuildMainMenu();
 }
 
 /**
-  * @brief  Show the main menu
+  * @brief  Show main menu
   * @retval None
   */
 void Menu_ShowMain(void)
 {
-  menuDepth = 0;
-  menuState = MENU_STATE_BROWSING;
-  CreateMainMenu();
-  Menu_DrawCurrentMenu();
+    /* Reset to main menu */
+    menuDepth = 0;
+    BuildMainMenu();
+    Menu_Display();
 }
 
 /**
-  * @brief  Return to previous menu level
+  * @brief  Return to previous menu
   * @retval None
   */
 void Menu_ReturnToPrevious(void)
 {
-  if (menuDepth > 0) {
-    menuDepth--;
-  }
-  menuState = MENU_STATE_BROWSING;
-  Menu_DrawCurrentMenu();
+    if (menuDepth > 0) {
+        menuDepth--;
+    }
+    Menu_Display();
 }
 
 /**
-  * @brief  Handle button event from UI
-  * @param  event: Button event information
+  * @brief  Display current menu
   * @retval None
   */
-void Menu_HandleButtonEvent(ButtonEvent_t* event)
+void Menu_Display(void)
 {
-  MenuAction_t action = MENU_ACTION_NONE;
-  
-  // Convert button events to menu actions
-  switch (event->buttonId) {
-    case BUTTON_SELECT:
-      if (event->eventType == BUTTON_PRESSED) {
-        action = MENU_ACTION_SELECT;
-      }
-      break;
-      
-    case BUTTON_BACK:
-      if (event->eventType == BUTTON_PRESSED) {
-        action = MENU_ACTION_BACK;
-      }
-      break;
-      
-    case BUTTON_ENCODER:
-      if (event->eventType == BUTTON_PRESSED) {
-        if (menuState == MENU_STATE_BROWSING) {
-          action = MENU_ACTION_SELECT;
-        } else if (menuState == MENU_STATE_EDITING) {
-          action = MENU_ACTION_SAVE;
-        }
-      } else if (event->eventType == BUTTON_LONG_PRESSED) {
-        if (menuState == MENU_STATE_EDITING) {
-          action = MENU_ACTION_CANCEL;
-        }
-      }
-      break;
-      
-    default:
-      break;
-  }
-  
-  // Process the action
-  if (action != MENU_ACTION_NONE) {
-    Menu_HandleInput(action, 0);
-  }
-}
-
-/**
-  * @brief  Handle rotary encoder event from UI
-  * @param  event: Rotary encoder event information
-  * @retval None
-  */
-void Menu_HandleRotaryEvent(RotaryEvent_t* event)
-{
-  if (menuState == MENU_STATE_BROWSING) {
-    // In browsing mode, change selected menu item
-    Menu_t* currentMenu = &menuStack[menuDepth];
-    int8_t newItem = currentMenu->currentItem + event->direction;
+    Menu_t *currentMenu = &menuStack[menuDepth];
     
-    // Wrap around menu
-    if (newItem < 0) {
-      newItem = currentMenu->numItems - 1;
-    } else if (newItem >= currentMenu->numItems) {
-      newItem = 0;
+    /* Clear display */
+    LCD_Clear();
+    
+    /* Display menu title */
+    LCD_SetCursor(0, MENU_TITLE_ROW);
+    LCD_Print(currentMenu->title);
+    
+    /* Display current menu item */
+    if (currentMenu->numItems > 0) {
+        LCD_SetCursor(0, MENU_ITEM_ROW);
+        LCD_Print(MENU_CURSOR);
+        LCD_Print(currentMenu->items[currentMenu->currentItem].text);
+    } else {
+        LCD_SetCursor(0, MENU_ITEM_ROW);
+        LCD_Print("No items");
+    }
+}
+
+/**
+  * @brief  Handle rotary encoder movement in menu
+  * @param  direction: Direction of rotation (1 = clockwise, -1 = counter-clockwise)
+  * @retval None
+  */
+void Menu_HandleRotary(int8_t direction)
+{
+    Menu_t *currentMenu = &menuStack[menuDepth];
+    
+    /* Handle based on menu state */
+    switch (menuState) {
+        case MENU_STATE_BROWSING:
+            if (direction > 0) {
+                /* Move to next item */
+                if (currentMenu->currentItem < currentMenu->numItems - 1) {
+                    currentMenu->currentItem++;
+                } else {
+                    currentMenu->currentItem = 0; /* Wrap around */
+                }
+            } else {
+                /* Move to previous item */
+                if (currentMenu->currentItem > 0) {
+                    currentMenu->currentItem--;
+                } else {
+                    currentMenu->currentItem = currentMenu->numItems - 1; /* Wrap around */
+                }
+            }
+            Menu_Display();
+            break;
+            
+        case MENU_STATE_EDITING:
+            /* Adjust parameter value */
+            currentParameter.value += direction * currentParameter.step;
+            
+            /* Clamp to min/max */
+            if (currentParameter.value > currentParameter.maxValue) {
+                currentParameter.value = currentParameter.maxValue;
+            }
+            if (currentParameter.value < currentParameter.minValue) {
+                currentParameter.value = currentParameter.minValue;
+            }
+            
+            /* Update display */
+            DisplayParameterEdit();
+            
+            /* Call update callback to reflect change in real-time */
+            if (currentParameter.updateCallback) {
+                currentParameter.updateCallback(currentParameter.bandId, 
+                                                currentParameter.paramId,
+                                                currentParameter.value);
+            }
+            break;
+            
+        case MENU_STATE_CONFIRMATION:
+            /* Toggle between yes/no */
+            confirmationOption = (confirmationOption == CONFIRM_YES) ? CONFIRM_NO : CONFIRM_YES;
+            
+            /* Update display */
+            LCD_SetCursor(0, 1);
+            if (confirmationOption == CONFIRM_YES) {
+                LCD_Print("> Yes   No    ");
+            } else {
+                LCD_Print("  Yes > No    ");
+            }
+            break;
+    }
+}
+
+/**
+  * @brief  Handle button press in menu
+  * @param  buttonId: ID of button pressed
+  * @retval None
+  */
+void Menu_HandleButton(uint8_t buttonId)
+{
+    Menu_t *currentMenu = &menuStack[menuDepth];
+    
+    /* Handle based on menu state */
+    switch (menuState) {
+        case MENU_STATE_BROWSING:
+            /* Process based on button type */
+            switch (buttonId) {
+                case BUTTON_ENCODER:  /* Select current item */
+                    if (currentMenu->numItems > 0 && currentMenu->items[currentMenu->currentItem].callback) {
+                        currentMenu->items[currentMenu->currentItem].callback(
+                            currentMenu->items[currentMenu->currentItem].id);
+                    }
+                    break;
+                    
+                case BUTTON_BACK:     /* Return to previous menu */
+                    if (menuDepth > 0) {
+                        menuDepth--;
+                        Menu_Display();
+                    }
+                    break;
+                    
+                case BUTTON_HOME:     /* Return to main menu */
+                    Menu_ShowMain();
+                    break;
+                    
+                default:
+                    /* Ignore other buttons */
+                    break;
+            }
+            break;
+            
+        case MENU_STATE_EDITING:
+            /* Process based on button type */
+            switch (buttonId) {
+                case BUTTON_ENCODER:  /* Confirm edit */
+                    ApplyParameterEdit();
+                    menuState = MENU_STATE_BROWSING;
+                    Menu_Display();
+                    break;
+                    
+                case BUTTON_BACK:     /* Cancel edit */
+                    CancelParameterEdit();
+                    menuState = MENU_STATE_BROWSING;
+                    Menu_Display();
+                    break;
+                    
+                default:
+                    /* Ignore other buttons */
+                    break;
+            }
+            break;
+            
+        case MENU_STATE_CONFIRMATION:
+            /* Process based on button type */
+            switch (buttonId) {
+                case BUTTON_ENCODER:  /* Confirm selection */
+                    HandleConfirmation();
+                    menuState = MENU_STATE_BROWSING;
+                    Menu_Display();
+                    break;
+                    
+                case BUTTON_BACK:     /* Cancel confirmation */
+                    menuState = MENU_STATE_BROWSING;
+                    Menu_Display();
+                    break;
+                    
+                default:
+                    /* Ignore other buttons */
+                    break;
+            }
+            break;
+    }
+}
+
+/**
+  * @brief  Build the main menu
+  * @retval None
+  */
+static void BuildMainMenu(void)
+{
+    Menu_t *menu = &menuStack[0];
+    uint8_t index = 0;
+    
+    /* Set menu title */
+    strncpy(menu->title, "Main Menu", MENU_ITEM_MAX_LENGTH);
+    
+    /* Add menu items */
+    strncpy(menu->items[index].text, "Crossover", MENU_ITEM_MAX_LENGTH);
+    menu->items[index].id = MENU_MAIN_CROSSOVER;
+    menu->items[index].callback = MainMenuCallback;
+    index++;
+    
+    strncpy(menu->items[index].text, "Compressor", MENU_ITEM_MAX_LENGTH);
+    menu->items[index].id = MENU_MAIN_COMPRESSOR;
+    menu->items[index].callback = MainMenuCallback;
+    index++;
+    
+    strncpy(menu->items[index].text, "Limiter", MENU_ITEM_MAX_LENGTH);
+    menu->items[index].id = MENU_MAIN_LIMITER;
+    menu->items[index].callback = MainMenuCallback;
+    index++;
+    
+    strncpy(menu->items[index].text, "Delay/Phase", MENU_ITEM_MAX_LENGTH);
+    menu->items[index].id = MENU_MAIN_DELAY_PHASE;
+    menu->items[index].callback = MainMenuCallback;
+    index++;
+    
+    strncpy(menu->items[index].text, "Presets", MENU_ITEM_MAX_LENGTH);
+    menu->items[index].id = MENU_MAIN_PRESETS;
+    menu->items[index].callback = MainMenuCallback;
+    index++;
+    
+    strncpy(menu->items[index].text, "About", MENU_ITEM_MAX_LENGTH);
+    menu->items[index].id = MENU_MAIN_ABOUT;
+    menu->items[index].callback = MainMenuCallback;
+    index++;
+    
+    /* Set menu properties */
+    menu->numItems = index;
+    menu->currentItem = 0;
+    menu->topDisplayedItem = 0;
+}
+
+/**
+  * @brief  Build the crossover menu
+  * @retval None
+  */
+static void BuildCrossoverMenu(void)
+{
+    Menu_t *menu = &menuStack[menuDepth];
+    uint8_t index = 0;
+    
+    /* Set menu title */
+    strncpy(menu->title, "Crossover", MENU_ITEM_MAX_LENGTH);
+    
+    /* Add menu items */
+    strncpy(menu->items[index].text, "Sub Band", MENU_ITEM_MAX_LENGTH);
+    menu->items[index].id = MENU_CROSSOVER_SUB;
+    menu->items[index].callback = CrossoverMenuCallback;
+    index++;
+    
+    strncpy(menu->items[index].text, "Low Band", MENU_ITEM_MAX_LENGTH);
+    menu->items[index].id = MENU_CROSSOVER_LOW;
+    menu->items[index].callback = CrossoverMenuCallback;
+    index++;
+    
+    strncpy(menu->items[index].text, "Mid Band", MENU_ITEM_MAX_LENGTH);
+    menu->items[index].id = MENU_CROSSOVER_MID;
+    menu->items[index].callback = CrossoverMenuCallback;
+    index++;
+    
+    strncpy(menu->items[index].text, "High Band", MENU_ITEM_MAX_LENGTH);
+    menu->items[index].id = MENU_CROSSOVER_HIGH;
+    menu->items[index].callback = CrossoverMenuCallback;
+    index++;
+    
+    /* Set menu properties */
+    menu->numItems = index;
+    menu->currentItem = 0;
+    menu->topDisplayedItem = 0;
+}
+
+/**
+  * @brief  Build the crossover band menu
+  * @param  band: Band index (0=Sub, 1=Low, 2=Mid, 3=High)
+  * @retval None
+  */
+static void BuildCrossoverBandMenu(uint8_t band)
+{
+    Menu_t *menu = &menuStack[menuDepth];
+    uint8_t index = 0;
+    char bandNames[MAX_BANDS][5] = {"Sub", "Low", "Mid", "High"};
+    
+    /* Set menu title based on band */
+    snprintf(menu->title, MENU_ITEM_MAX_LENGTH, "%s Band XO", bandNames[band]);
+    
+    /* Add menu items */
+    strncpy(menu->items[index].text, "Frequency", MENU_ITEM_MAX_LENGTH);
+    menu->items[index].id = PARAM_CROSSOVER_FREQUENCY;
+    menu->items[index].callback = CrossoverBandMenuCallback;
+    index++;
+    
+    strncpy(menu->items[index].text, "Filter Type", MENU_ITEM_MAX_LENGTH);
+    menu->items[index].id = PARAM_CROSSOVER_TYPE;
+    menu->items[index].callback = CrossoverBandMenuCallback;
+    index++;
+    
+    strncpy(menu->items[index].text, "Gain", MENU_ITEM_MAX_LENGTH);
+    menu->items[index].id = PARAM_CROSSOVER_GAIN;
+    menu->items[index].callback = CrossoverBandMenuCallback;
+    index++;
+    
+    strncpy(menu->items[index].text, "Mute", MENU_ITEM_MAX_LENGTH);
+    menu->items[index].id = PARAM_CROSSOVER_MUTE;
+    menu->items[index].callback = CrossoverBandMenuCallback;
+    index++;
+    
+    /* Set menu properties */
+    menu->numItems = index;
+    menu->currentItem = 0;
+    menu->topDisplayedItem = 0;
+}
+
+/**
+  * @brief  Build the compressor menu
+  * @retval None
+  */
+static void BuildCompressorMenu(void)
+{
+    Menu_t *menu = &menuStack[menuDepth];
+    uint8_t index = 0;
+    
+    /* Set menu title */
+    strncpy(menu->title, "Compressor", MENU_ITEM_MAX_LENGTH);
+    
+    /* Add menu items */
+    strncpy(menu->items[index].text, "Threshold", MENU_ITEM_MAX_LENGTH);
+    menu->items[index].id = MENU_COMPRESSOR_THRESHOLD;
+    menu->items[index].callback = CompressorMenuCallback;
+    index++;
+    
+    strncpy(menu->items[index].text, "Ratio", MENU_ITEM_MAX_LENGTH);
+    menu->items[index].id = MENU_COMPRESSOR_RATIO;
+    menu->items[index].callback = CompressorMenuCallback;
+    index++;
+    
+    strncpy(menu->items[index].text, "Attack", MENU_ITEM_MAX_LENGTH);
+    menu->items[index].id = MENU_COMPRESSOR_ATTACK;
+    menu->items[index].callback = CompressorMenuCallback;
+    index++;
+    
+    strncpy(menu->items[index].text, "Release", MENU_ITEM_MAX_LENGTH);
+    menu->items[index].id = MENU_COMPRESSOR_RELEASE;
+    menu->items[index].callback = CompressorMenuCallback;
+    index++;
+    
+    strncpy(menu->items[index].text, "Makeup Gain", MENU_ITEM_MAX_LENGTH);
+    menu->items[index].id = MENU_COMPRESSOR_MAKEUP;
+    menu->items[index].callback = CompressorMenuCallback;
+    index++;
+    
+    /* Set menu properties */
+    menu->numItems = index;
+    menu->currentItem = 0;
+    menu->topDisplayedItem = 0;
+}
+
+/**
+  * @brief  Build the limiter menu
+  * @retval None
+  */
+static void BuildLimiterMenu(void)
+{
+    Menu_t *menu = &menuStack[menuDepth];
+    uint8_t index = 0;
+    
+    /* Set menu title */
+    strncpy(menu->title, "Limiter", MENU_ITEM_MAX_LENGTH);
+    
+    /* Add menu items */
+    strncpy(menu->items[index].text, "Threshold", MENU_ITEM_MAX_LENGTH);
+    menu->items[index].id = MENU_LIMITER_THRESHOLD;
+    menu->items[index].callback = LimiterMenuCallback;
+    index++;
+    
+    strncpy(menu->items[index].text, "Release", MENU_ITEM_MAX_LENGTH);
+    menu->items[index].id = MENU_LIMITER_RELEASE;
+    menu->items[index].callback = LimiterMenuCallback;
+    index++;
+    
+    /* Set menu properties */
+    menu->numItems = index;
+    menu->currentItem = 0;
+    menu->topDisplayedItem = 0;
+}
+
+/**
+  * @brief  Build the delay/phase menu
+  * @retval None
+  */
+static void BuildDelayPhaseMenu(void)
+{
+    Menu_t *menu = &menuStack[menuDepth];
+    uint8_t index = 0;
+    
+    /* Set menu title */
+    strncpy(menu->title, "Delay/Phase", MENU_ITEM_MAX_LENGTH);
+    
+    /* Add menu items */
+    strncpy(menu->items[index].text, "Sub Delay", MENU_ITEM_MAX_LENGTH);
+    menu->items[index].id = MENU_DELAY_PHASE_SUB_DELAY;
+    menu->items[index].callback = DelayPhaseMenuCallback;
+    index++;
+    
+    strncpy(menu->items[index].text, "Low Delay", MENU_ITEM_MAX_LENGTH);
+    menu->items[index].id = MENU_DELAY_PHASE_LOW_DELAY;
+    menu->items[index].callback = DelayPhaseMenuCallback;
+    index++;
+    
+    strncpy(menu->items[index].text, "Mid Delay", MENU_ITEM_MAX_LENGTH);
+    menu->items[index].id = MENU_DELAY_PHASE_MID_DELAY;
+    menu->items[index].callback = DelayPhaseMenuCallback;
+    index++;
+    
+    strncpy(menu->items[index].text, "High Delay", MENU_ITEM_MAX_LENGTH);
+    menu->items[index].id = MENU_DELAY_PHASE_HIGH_DELAY;
+    menu->items[index].callback = DelayPhaseMenuCallback;
+    index++;
+    
+    strncpy(menu->items[index].text, "Sub Phase", MENU_ITEM_MAX_LENGTH);
+    menu->items[index].id = MENU_DELAY_PHASE_SUB_PHASE;
+    menu->items[index].callback = DelayPhaseMenuCallback;
+    index++;
+    
+    strncpy(menu->items[index].text, "Low Phase", MENU_ITEM_MAX_LENGTH);
+    menu->items[index].id = MENU_DELAY_PHASE_LOW_PHASE;
+    menu->items[index].callback = DelayPhaseMenuCallback;
+    index++;
+    
+    strncpy(menu->items[index].text, "Mid Phase", MENU_ITEM_MAX_LENGTH);
+    menu->items[index].id = MENU_DELAY_PHASE_MID_PHASE;
+    menu->items[index].callback = DelayPhaseMenuCallback;
+    index++;
+    
+    strncpy(menu->items[index].text, "High Phase", MENU_ITEM_MAX_LENGTH);
+    menu->items[index].id = MENU_DELAY_PHASE_HIGH_PHASE;
+    menu->items[index].callback = DelayPhaseMenuCallback;
+    index++;
+    
+    /* Set menu properties */
+    menu->numItems = index;
+    menu->currentItem = 0;
+    menu->topDisplayedItem = 0;
+}
+
+/**
+  * @brief  Build the preset menu
+  * @retval None
+  */
+static void BuildPresetMenu(void)
+{
+    Menu_t *menu = &menuStack[menuDepth];
+    uint8_t index = 0;
+    
+    /* Set menu title */
+    strncpy(menu->title, "Presets", MENU_ITEM_MAX_LENGTH);
+    
+    /* Add menu items */
+    strncpy(menu->items[index].text, "Load Preset", MENU_ITEM_MAX_LENGTH);
+    menu->items[index].id = MENU_PRESET_LOAD;
+    menu->items[index].callback = PresetMenuCallback;
+    index++;
+    
+    strncpy(menu->items[index].text, "Save Preset", MENU_ITEM_MAX_LENGTH);
+    menu->items[index].id = MENU_PRESET_SAVE;
+    menu->items[index].callback = PresetMenuCallback;
+    index++;
+    
+    /* Set menu properties */
+    menu->numItems = index;
+    menu->currentItem = 0;
+    menu->topDisplayedItem = 0;
+}
+
+/**
+  * @brief  Build the load preset menu
+  * @retval None
+  */
+static void BuildLoadPresetMenu(void)
+{
+    Menu_t *menu = &menuStack[menuDepth];
+    uint8_t index = 0;
+    
+    /* Set menu title */
+    strncpy(menu->title, "Load Preset", MENU_ITEM_MAX_LENGTH);
+    
+    /* Add factory presets */
+    strncpy(menu->items[index].text, "Default (Flat)", MENU_ITEM_MAX_LENGTH);
+    menu->items[index].id = 0;
+    menu->items[index].callback = LoadPresetMenuCallback;
+    index++;
+    
+    strncpy(menu->items[index].text, "Rock", MENU_ITEM_MAX_LENGTH);
+    menu->items[index].id = 1;
+    menu->items[index].callback = LoadPresetMenuCallback;
+    index++;
+    
+    strncpy(menu->items[index].text, "Jazz", MENU_ITEM_MAX_LENGTH);
+    menu->items[index].id = 2;
+    menu->items[index].callback = LoadPresetMenuCallback;
+    index++;
+    
+    strncpy(menu->items[index].text, "Dangdut", MENU_ITEM_MAX_LENGTH);
+    menu->items[index].id = 3;
+    menu->items[index].callback = LoadPresetMenuCallback;
+    index++;
+    
+    strncpy(menu->items[index].text, "Pop", MENU_ITEM_MAX_LENGTH);
+    menu->items[index].id = 4;
+    menu->items[index].callback = LoadPresetMenuCallback;
+    index++;
+    
+    /* Add user presets */
+    for (uint8_t i = 0; i < PresetManager_GetNumUserPresets(); i++) {
+        snprintf(menu->items[index].text, MENU_ITEM_MAX_LENGTH, "User %d", i+1);
+        menu->items[index].id = i + 5;  // Start user presets after factory presets
+        menu->items[index].callback = LoadPresetMenuCallback;
+        index++;
+        
+        if (index >= MAX_MENU_ITEMS) {
+            break;  // Prevent overflow
+        }
     }
     
-    // Update selection and redraw
-    currentMenu->currentItem = newItem;
-    textScrollPos = 0; // Reset text scrolling
-    lastScrollTime = HAL_GetTick() + SCROLL_TIMEOUT;
-    Menu_DrawCurrentMenu();
-  } else if (menuState == MENU_STATE_EDITING) {
-    // In editing mode, change parameter value
-    Menu_UpdateEditValue(event->direction);
-  }
+    /* Set menu properties */
+    menu->numItems = index;
+    menu->currentItem = 0;
+    menu->topDisplayedItem = 0;
 }
 
 /**
-  * @brief  Draw the current menu on the LCD
+  * @brief  Build the save preset menu
   * @retval None
   */
-static void Menu_DrawCurrentMenu(void)
+static void BuildSavePresetMenu(void)
 {
-  char buffer[17]; // 16 characters + null terminator
-  
-  // Clear display
-  LCD_Clear();
-  
-  // Check current state
-  switch (menuState) {
-    case MENU_STATE_BROWSING:
-      {
-        Menu_t* currentMenu = &menuStack[menuDepth];
-        
-        // Display menu title on first line
-        LCD_SetCursor(0, 0);
-        LCD_Print(currentMenu->title);
-        
-        // Display currently selected item on second line
-        if (currentMenu->numItems > 0) {
-          LCD_SetCursor(0, 1);
-          LCD_Print(currentMenu->items[currentMenu->currentItem].name);
+    Menu_t *menu = &menuStack[menuDepth];
+    uint8_t index = 0;
+    uint8_t maxUserPresets = 5; // Maximum number of user presets
+    
+    /* Set menu title */
+    strncpy(menu->title, "Save Preset", MENU_ITEM_MAX_LENGTH);
+    
+    /* Add user preset slots */
+    for (uint8_t i = 0; i < maxUserPresets; i++) {
+        if (i < PresetManager_GetNumUserPresets()) {
+            snprintf(menu->items[index].text, MENU_ITEM_MAX_LENGTH, "Replace User %d", i+1);
         } else {
-          LCD_SetCursor(0, 1);
-          LCD_Print("No items");
+            snprintf(menu->items[index].text, MENU_ITEM_MAX_LENGTH, "New User %d", i+1);
         }
-      }
-      break;
-      
-    case MENU_STATE_EDITING:
-      {
-        Menu_t* currentMenu = &menuStack[menuDepth];
-        MenuItem_t* currentItem = &currentMenu->items[currentMenu->currentItem];
-        
-        // Display parameter name on first line
-        LCD_SetCursor(0, 0);
-        LCD_Print(currentItem->name);
-        
-        // Display parameter value on second line
-        LCD_SetCursor(0, 1);
-        Menu_FormatParameterValue(buffer, editValue, currentItem->decimalPlaces, currentItem->unit);
-        LCD_Print(buffer);
-      }
-      break;
-      
-    case MENU_STATE_CONFIRM:
-      {
-        // Display confirmation message
-        LCD_SetCursor(0, 0);
-        LCD_Print("Confirm?");
-        LCD_SetCursor(0, 1);
-        LCD_Print(messageText);
-      }
-      break;
-      
-    case MENU_STATE_MESSAGE:
-      {
-        // Display message
-        LCD_SetCursor(0, 0);
-        LCD_Print(messageText);
-      }
-      break;
-  }
+        menu->items[index].id = i;
+        menu->items[index].callback = SavePresetMenuCallback;
+        index++;
+    }
+    
+    /* Set menu properties */
+    menu->numItems = index;
+    menu->currentItem = 0;
+    menu->topDisplayedItem = 0;
 }
 
 /**
-  * @brief  Handle menu navigation and selection
-  * @param  action: Menu action to perform
-  * @param  value: Value for the action (if any)
+  * @brief  Handle main menu selection
+  * @param  itemId: Selected item ID
   * @retval None
   */
-static void Menu_HandleInput(MenuAction_t action, int16_t value)
+static void MainMenuCallback(uint8_t itemId)
 {
-  Menu_t* currentMenu = &menuStack[menuDepth];
-  
-  switch (menuState) {
-    case MENU_STATE_BROWSING:
-      switch (action) {
-        case MENU_ACTION_SELECT:
-          if (currentMenu->numItems > 0) {
-            MenuItem_t* currentItem = &currentMenu->items[currentMenu->currentItem];
+    /* Increment menu depth */
+    menuDepth++;
+    
+    /* Build submenu based on selected item */
+    switch (itemId) {
+        case MENU_MAIN_CROSSOVER:
+            BuildCrossoverMenu();
+            break;
             
-            // Check if this item has a parameter to edit
-            if (currentItem->parameter != NULL) {
-              // Enter editing mode
-              menuState = MENU_STATE_EDITING;
-              // Get current parameter value
-              editValue = *((float*)currentItem->parameter);
-              Menu_DrawCurrentMenu();
-            } else if (currentItem->callback != NULL) {
-              // Call the menu item's callback function
-              currentItem->callback();
+        case MENU_MAIN_COMPRESSOR:
+            BuildCompressorMenu();
+            break;
+            
+        case MENU_MAIN_LIMITER:
+            BuildLimiterMenu();
+            break;
+            
+        case MENU_MAIN_DELAY_PHASE:
+            BuildDelayPhaseMenu();
+            break;
+            
+        case MENU_MAIN_PRESETS:
+            BuildPresetMenu();
+            break;
+            
+        case MENU_MAIN_ABOUT:
+            /* Display about information */
+            LCD_Clear();
+            LCD_SetCursor(0, 0);
+            LCD_Print("Audio Crossover");
+            LCD_SetCursor(0, 1);
+            LCD_Print("Ver. 1.0");
+            menuDepth--; /* Stay in current menu */
+            return;
+            
+        default:
+            /* Unknown item, return to current menu */
+            menuDepth--;
+            break;
+    }
+    
+    /* Display new menu */
+    Menu_Display();
+}
+
+/**
+  * @brief  Handle crossover menu selection
+  * @param  itemId: Selected item ID
+  * @retval None
+  */
+static void CrossoverMenuCallback(uint8_t itemId)
+{
+    /* Increment menu depth */
+    menuDepth++;
+    
+    /* Build band submenu based on selected item */
+    switch (itemId) {
+        case MENU_CROSSOVER_SUB:
+            BuildCrossoverBandMenu(BAND_SUB);
+            break;
+            
+        case MENU_CROSSOVER_LOW:
+            BuildCrossoverBandMenu(BAND_LOW);
+            break;
+            
+        case MENU_CROSSOVER_MID:
+            BuildCrossoverBandMenu(BAND_MID);
+            break;
+            
+        case MENU_CROSSOVER_HIGH:
+            BuildCrossoverBandMenu(BAND_HIGH);
+            break;
+            
+        default:
+            /* Unknown item, return to current menu */
+            menuDepth--;
+            break;
+    }
+    
+    /* Display new menu */
+    Menu_Display();
+}
+
+/**
+  * @brief  Handle crossover band menu selection
+  * @param  itemId: Selected item ID
+  * @retval None
+  */
+static void CrossoverBandMenuCallback(uint8_t itemId)
+{
+    /* Get band from previous menu */
+    uint8_t band = 0;
+    switch (menuStack[menuDepth-1].items[menuStack[menuDepth-1].currentItem].id) {
+        case MENU_CROSSOVER_SUB: band = BAND_SUB; break;
+        case MENU_CROSSOVER_LOW: band = BAND_LOW; break;
+        case MENU_CROSSOVER_MID: band = BAND_MID; break;
+        case MENU_CROSSOVER_HIGH: band = BAND_HIGH; break;
+        default: return; /* Invalid band */
+    }
+    
+    /* Handle based on parameter selected */
+    switch (itemId) {
+        case PARAM_CROSSOVER_FREQUENCY:
+            {
+                int32_t minFreq = 20;
+                int32_t maxFreq = 20000;
+                int32_t step = 10;
+                
+                /* Adjust range based on band */
+                if (band == BAND_SUB) {
+                    maxFreq = 200;
+                } else if (band == BAND_LOW) {
+                    minFreq = 100;
+                    maxFreq = 2000;
+                } else if (band == BAND_MID) {
+                    minFreq = 500;
+                    maxFreq = 8000;
+                } else if (band == BAND_HIGH) {
+                    minFreq = 2000;
+                }
+                
+                /* Get current frequency */
+                int32_t currentFreq = Crossover_GetFrequency(band);
+                
+                /* Edit parameter */
+                EditParameter("Frequency (Hz)", currentFreq, minFreq, maxFreq, step, 0,
+                              MODULE_CROSSOVER, PARAM_CROSSOVER_FREQUENCY, band,
+                              UpdateCrossoverParameter);
             }
-          }
-          break;
-          
-        case MENU_ACTION_BACK:
-          Menu_NavigateBack();
-          break;
-          
+            break;
+            
+        case PARAM_CROSSOVER_TYPE:
+            {
+                /* Get current filter type */
+                int32_t currentType = Crossover_GetFilterType(band);
+                
+                /* Edit parameter (filter types: 0=Butterworth, 1=Linkwitz-Riley) */
+                EditParameter("Filter Type", currentType, 0, 1, 1, 0,
+                              MODULE_CROSSOVER, PARAM_CROSSOVER_TYPE, band,
+                              UpdateCrossoverParameter);
+            }
+            break;
+            
+        case PARAM_CROSSOVER_GAIN:
+            {
+                /* Get current gain */
+                int32_t currentGain = Crossover_GetGain(band);
+                
+                /* Edit parameter (gain in 0.1 dB steps) */
+                EditParameter("Gain (dB)", currentGain, -200, 120, 1, 1,
+                              MODULE_CROSSOVER, PARAM_CROSSOVER_GAIN, band,
+                              UpdateCrossoverParameter);
+            }
+            break;
+            
+        case PARAM_CROSSOVER_MUTE:
+            {
+                /* Get current mute state */
+                int32_t currentMute = Crossover_GetMute(band);
+                
+                /* Edit parameter (0=Unmuted, 1=Muted) */
+                EditParameter("Mute", currentMute, 0, 1, 1, 0,
+                              MODULE_CROSSOVER, PARAM_CROSSOVER_MUTE, band,
+                              UpdateCrossoverParameter);
+            }
+            break;
+            
         default:
-          break;
-      }
-      break;
-      
-    case MENU_STATE_EDITING:
-      switch (action) {
-        case MENU_ACTION_SAVE:
-          {
-            MenuItem_t* currentItem = &currentMenu->items[currentMenu->currentItem];
-            // Save the edited value to the parameter
-            *((float*)currentItem->parameter) = editValue;
-            // Return to browsing mode
-            menuState = MENU_STATE_BROWSING;
-            Menu_DrawCurrentMenu();
-          }
-          break;
-          
-        case MENU_ACTION_CANCEL:
-          // Cancel editing and return to browsing mode
-          menuState = MENU_STATE_BROWSING;
-          Menu_DrawCurrentMenu();
-          break;
-          
-        case MENU_ACTION_BACK:
-          // Same as cancel in edit mode
-          menuState = MENU_STATE_BROWSING;
-          Menu_DrawCurrentMenu();
-          break;
-          
-        default:
-          break;
-      }
-      break;
-      
-    case MENU_STATE_CONFIRM:
-      // Not implemented yet, will be used for confirmation dialogs
-      break;
-      
-    case MENU_STATE_MESSAGE:
-      // Any key dismisses a message
-      menuState = MENU_STATE_BROWSING;
-      Menu_DrawCurrentMenu();
-      break;
-  }
+            /* Unknown parameter */
+            break;
+    }
 }
 
 /**
-  * @brief  Update parameter value during editing
-  * @param  direction: Direction of change (+1 or -1)
+  * @brief  Handle compressor menu selection
+  * @param  itemId: Selected item ID
   * @retval None
   */
-static void Menu_UpdateEditValue(int16_t direction)
+static void CompressorMenuCallback(uint8_t itemId)
 {
-  Menu_t* currentMenu = &menuStack[menuDepth];
-  MenuItem_t* currentItem = &currentMenu->items[currentMenu->currentItem];
-  
-  // Calculate new value with step size
-  float newValue = editValue + (currentItem->step * direction);
-  
-  // Clamp to min/max range
-  if (newValue < currentItem->minValue) {
-    newValue = currentItem->minValue;
-  } else if (newValue > currentItem->maxValue) {
-    newValue = currentItem->maxValue;
-  }
-  
-  // Update value and redraw
-  editValue = newValue;
-  Menu_DrawCurrentMenu();
+    /* Handle based on parameter selected */
+    switch (itemId) {
+        case MENU_COMPRESSOR_THRESHOLD:
+            {
+                /* Get current threshold */
+                int32_t currentThreshold = Compressor_GetThreshold();
+                
+                /* Edit parameter (threshold in 0.1 dB steps) */
+                EditParameter("Threshold (dB)", currentThreshold, -600, 0, 1, 1,
+                              MODULE_COMPRESSOR, PARAM_COMPRESSOR_THRESHOLD, 0,
+                              UpdateCompressorParameter);
+            }
+            break;
+            
+        case MENU_COMPRESSOR_RATIO:
+            {
+                /* Get current ratio */
+                int32_t currentRatio = Compressor_GetRatio();
+                
+                /* Edit parameter (ratio in 0.1 steps) */
+                EditParameter("Ratio (x:1)", currentRatio, 10, 100, 1, 1,
+                              MODULE_COMPRESSOR, PARAM_COMPRESSOR_RATIO, 0,
+                              UpdateCompressorParameter);
+            }
+            break;
+            
+        case MENU_COMPRESSOR_ATTACK:
+            {
+                /* Get current attack time */
+                int32_t currentAttack = Compressor_GetAttack();
+                
+                /* Edit parameter (attack in ms) */
+                EditParameter("Attack (ms)", currentAttack, 1, 200, 1, 0,
+                              MODULE_COMPRESSOR, PARAM_COMPRESSOR_ATTACK, 0,
+                              UpdateCompressorParameter);
+            }
+            break;
+            
+        case MENU_COMPRESSOR_RELEASE:
+            {
+                /* Get current release time */
+                int32_t currentRelease = Compressor_GetRelease();
+                
+                /* Edit parameter (release in ms) */
+                EditParameter("Release (ms)", currentRelease, 10, 1000, 10, 0,
+                              MODULE_COMPRESSOR, PARAM_COMPRESSOR_RELEASE, 0,
+                              UpdateCompressorParameter);
+            }
+            break;
+            
+        case MENU_COMPRESSOR_MAKEUP:
+            {
+                /* Get current makeup gain */
+                int32_t currentMakeup = Compressor_GetMakeupGain();
+                
+                /* Edit parameter (makeup gain in 0.1 dB steps) */
+                EditParameter("Makeup (dB)", currentMakeup, 0, 200, 1, 1,
+                              MODULE_COMPRESSOR, PARAM_COMPRESSOR_MAKEUP, 0,
+                              UpdateCompressorParameter);
+            }
+            break;
+            
+        default:
+            /* Unknown parameter */
+            break;
+    }
 }
 
 /**
-  * @brief  Format parameter value with proper decimal places and unit
-  * @param  buffer: Buffer to store formatted string
-  * @param  value: Value to format
-  * @param  decimalPlaces: Number of decimal places
-  * @param  unit: Unit string (can be NULL)
+  * @brief  Handle limiter menu selection
+  * @param  itemId: Selected item ID
   * @retval None
   */
-static void Menu_FormatParameterValue(char* buffer, float value, uint8_t decimalPlaces, char* unit)
+static void LimiterMenuCallback(uint8_t itemId)
 {
-  // Format based on decimal places
-  switch (decimalPlaces) {
-    case 0:
-      sprintf(buffer, "%d", (int)value);
-      break;
-    case 1:
-      sprintf(buffer, "%.1f", value);
-      break;
-    case 2:
-      sprintf(buffer, "%.2f", value);
-      break;
-    case 3:
-      sprintf(buffer, "%.3f", value);
-      break;
-    default:
-      sprintf(buffer, "%.2f", value);
-      break;
-  }
-  
-  // Add unit if provided
-  if (unit != NULL) {
-    strcat(buffer, " ");
-    strcat(buffer, unit);
-  }
+    /* Handle based on parameter selected */
+    switch (itemId) {
+        case MENU_LIMITER_THRESHOLD:
+            {
+                /* Get current threshold */
+                int32_t currentThreshold = Limiter_GetThreshold();
+                
+                /* Edit parameter (threshold in 0.1 dB steps) */
+                EditParameter("Threshold (dB)", currentThreshold, -300, 0, 1, 1,
+                              MODULE_LIMITER, PARAM_LIMITER_THRESHOLD, 0,
+                              UpdateLimiterParameter);
+            }
+            break;
+            
+        case MENU_LIMITER_RELEASE:
+            {
+                /* Get current release time */
+                int32_t currentRelease = Limiter_GetRelease();
+                
+                /* Edit parameter (release in ms) */
+                EditParameter("Release (ms)", currentRelease, 10, 1000, 10, 0,
+                              MODULE_LIMITER, PARAM_LIMITER_RELEASE, 0,
+                              UpdateLimiterParameter);
+            }
+            break;
+            
+        default:
+            /* Unknown parameter */
+            break;
+    }
+}
+
+/**
+  * @brief  Handle delay/phase menu selection
+  * @param  itemId: Selected item ID
+  * @retval None
+  */
+static void DelayPhaseMenuCallback(uint8_t itemId)
+{
+    /* Increment menu depth */
+    menuDepth++;
+    
+    /* Build submenu based on selected item */
+    switch (itemId) {
+        case MENU_DELAY_PHASE_SUB_DELAY:
+            BuildDelayBandMenu(BAND_SUB);
+            break;
+            
+        case MENU_DELAY_PHASE_LOW_DELAY:
+            BuildDelayBandMenu(BAND_LOW);
+            break;
+            
+        case MENU_DELAY_PHASE_MID_DELAY:
+            BuildDelayBandMenu(BAND_MID);
+            break;
+            
+        case MENU_DELAY_PHASE_HIGH_DELAY:
+            BuildDelayBandMenu(BAND_HIGH);
+            break;
+            
+        case MENU_DELAY_PHASE_SUB_PHASE:
+            BuildPhaseBandMenu(BAND_SUB);
+            break;
+            
+        case MENU_DELAY_PHASE_LOW_PHASE:
+            BuildPhaseBandMenu(BAND_LOW);
+            break;
+            
+        case MENU_DELAY_PHASE_MID_PHASE:
+            BuildPhaseBandMenu(BAND_MID);
+            break;
+            
+        case MENU_DELAY_PHASE_HIGH_PHASE:
+            BuildPhaseBandMenu(BAND_HIGH);
+            break;
+            
+        default:
+            /* Unknown item, return to current menu */
+            menuDepth--;
+            break;
+    }
+    
+    /* Display new menu */
+    Menu_Display();
+}
+
+/**
+  * @brief  Build the delay band menu
+  * @param  band: Band index (0=Sub, 1=Low, 2=Mid, 3=High)
+  * @retval None
+  */
+static void BuildDelayBandMenu(uint8_t band)
+{
+    char bandNames[MAX_BANDS][5] = {"Sub", "Low", "Mid", "High"};
+    
+    /* Get current delay */
+    int32_t currentDelay = Delay_GetTime(band);
+    
+    /* Edit parameter directly (delay in ms) */
+    EditParameter("Delay (ms)", currentDelay, 0, 100, 1, 0,
+                  MODULE_DELAY, PARAM_DELAY_TIME, band,
+                  UpdateDelayParameter);
+    
+    /* Decrement menu depth since we're not actually building a menu */
+    menuDepth--;
+}
+
+/**
+  * @brief  Build the phase band menu
+  * @param  band: Band index (0=Sub, 1=Low, 2=Mid, 3=High)
+  * @retval None
+  */
+static void BuildPhaseBandMenu(uint8_t band)
+{
+    char bandNames[MAX_BANDS][5] = {"Sub", "Low", "Mid", "High"};
+    
+    /* Get current phase */
+    int32_t currentPhase = Delay_GetPhaseInvert(band);
+    
+    /* Edit parameter directly (0=Normal, 1=Inverted) */
+    EditParameter("Phase Invert", currentPhase, 0, 1, 1, 0,
+                  MODULE_PHASE, PARAM_PHASE_INVERT, band,
+                  UpdatePhaseParameter);
+    
+    /* Decrement menu depth since we're not actually building a menu */
+    menuDepth--;
+}
+
+/**
+  * @brief  Handle preset menu selection
+  * @param  itemId: Selected item ID
+  * @retval None
+  */
+static void PresetMenuCallback(uint8_t itemId)
+{
+    /* Increment menu depth */
+    menuDepth++;
+    
+    /* Build submenu based on selected item */
+    switch (itemId) {
+        case MENU_PRESET_LOAD:
+            BuildLoadPresetMenu();
+            break;
+            
+        case MENU_PRESET_SAVE:
+            BuildSavePresetMenu();
+            break;
+            
+        default:
+            /* Unknown item, return to current menu */
+            menuDepth--;
+            break;
+    }
+    
+    /* Display new menu */
+    Menu_Display();
+}
+
+/**
+  * @brief  Handle load preset menu selection
+  * @param  itemId: Selected item ID
+  * @retval None
+  */
+static void LoadPresetMenuCallback(uint8_t itemId)
+{
+    /* Store selected preset */
+    selectedPreset = itemId;
+    
+    /* Show confirmation dialog */
+    ShowConfirmation("Load preset?", CONFIRM_ACTION_LOAD_PRESET);
+}
+
+/**
+  * @brief  Handle save preset menu selection
+  * @param  itemId: Selected item ID
+  * @retval None
+  */
+static void SavePresetMenuCallback(uint8_t itemId)
+{
+    /* Store selected preset */
+    selectedPreset = itemId;
+    
+    /* Show confirmation dialog */
+    ShowConfirmation("Save preset?", CONFIRM_ACTION_SAVE_PRESET);
+}
+
+/**
+  * @brief  Edit a parameter
+  * @param  name: Parameter name
+  * @param  value: Current value
+  * @param  minValue: Minimum value
+  * @param  maxValue: Maximum value
+  * @param  step: Step value for adjustment
+  * @param  precision: Number of decimal places to display
+  * @param  moduleId: ID of module (crossover, compressor, etc.)
+  * @param  paramId: ID of parameter within module
+  * @param  bandId: Band ID (for band-specific parameters)
+  * @param  updateCallback: Callback to update parameter value
+  * @retval None
+  */
+static void EditParameter(const char* name, int32_t value, int32_t minValue, int32_t maxValue, 
+                          int32_t step, uint8_t precision, uint8_t moduleId, uint8_t paramId, uint8_t bandId,
+                          void (*updateCallback)(uint8_t, uint8_t, int32_t))
+{
+    /* Save parameter information */
+    strncpy(currentParameter.name, name, MENU_ITEM_MAX_LENGTH);
+    currentParameter.value = value;
+    currentParameter.minValue = minValue;
+    currentParameter.maxValue = maxValue;
+    currentParameter.step = step;
+    currentParameter.originalValue = value;
+    currentParameter.precision = precision;
+    currentParameter.moduleId = moduleId;
+    currentParameter.paramId = paramId;
+    currentParameter.bandId = bandId;
+    currentParameter.updateCallback = updateCallback;
+    
+    /* Switch to editing state */
+    menuState = MENU_STATE_EDITING;
+    
+    /* Display parameter edit screen */
+    DisplayParameterEdit();
+}
+
+/**
+  * @brief  Display parameter edit screen
+  * @retval None
+  */
+static void DisplayParameterEdit(void)
+{
+    char valueStr[16];
+    
+    /* Clear display */
+    LCD_Clear();
+    
+    /* Display parameter name */
+    LCD_SetCursor(0, 0);
+    LCD_Print(currentParameter.name);
+    
+    /* Format value string based on precision */
+    if (currentParameter.precision == 0) {
+        /* Integer value */
+        snprintf(valueStr, sizeof(valueStr), "%ld", currentParameter.value);
+    } else if (currentParameter.precision == 1) {
+        /* One decimal place */
+        snprintf(valueStr, sizeof(valueStr), "%ld.%01ld", 
+                 currentParameter.value / 10,
+                 abs(currentParameter.value) % 10);
+    } else {
+        /* Two decimal places */
+        snprintf(valueStr, sizeof(valueStr), "%ld.%02ld", 
+                 currentParameter.value / 100,
+                 abs(currentParameter.value) % 100);
+    }
+    
+    /* Display value */
+    LCD_SetCursor(0, 1);
+    LCD_Print(valueStr);
+}
+
+/**
+  * @brief  Apply parameter edit
+  * @retval None
+  */
+static void ApplyParameterEdit(void)
+{
+    /* Call update callback with final value */
+    if (currentParameter.updateCallback) {
+        currentParameter.updateCallback(currentParameter.bandId, 
+                                        currentParameter.paramId,
+                                        currentParameter.value);
+    }
+}
+
+/**
+  * @brief  Cancel parameter edit
+  * @retval None
+  */
+static void CancelParameterEdit(void)
+{
+    /* Call update callback with original value to revert */
+    if (currentParameter.updateCallback) {
+        currentParameter.updateCallback(currentParameter.bandId, 
+                                        currentParameter.paramId,
+                                        currentParameter.originalValue);
+    }
 }
 
 /**
   * @brief  Show confirmation dialog
   * @param  message: Confirmation message
-  * @param  confirmCallback: Function to call if confirmed
+  * @param  action: Action ID for confirmation
   * @retval None
   */
-static void Menu_ShowConfirmation(char* message, void (*confirmCallback)(void))
+static void ShowConfirmation(const char* message, uint8_t action)
 {
-  // Store message
-  strncpy(messageText, message, sizeof(messageText) - 1);
-  messageText[sizeof(messageText) - 1] = '\0';
-  
-  // TODO: Store callback for later use when implementing confirmations
-  
-  // Show confirmation dialog
-  menuState = MENU_STATE_CONFIRM;
-  Menu_DrawCurrentMenu();
-}
-
-/**
-  * @brief  Show temporary message
-  * @param  message: Message to display
-  * @param  timeout: Message timeout in milliseconds
-  * @retval None
-  */
-static void Menu_ShowMessage(char* message, uint32_t timeout)
-{
-  // Store message and timeout
-  strncpy(messageText, message, sizeof(messageText) - 1);
-  messageText[sizeof(messageText) - 1] = '\0';
-  messageTimeout = HAL_GetTick() + timeout;
-  
-  // Show message
-  menuState = MENU_STATE_MESSAGE;
-  Menu_DrawCurrentMenu();
-}
-
-/**
-  * @brief  Navigate back to previous menu
-  * @retval None
-  */
-static void Menu_NavigateBack(void)
-{
-  if (menuDepth > 0) {
-    menuDepth--;
-    Menu_DrawCurrentMenu();
-  }
-}
-
-/*----------------------------------------------------------------------------*/
-/* Menu Creation Functions                                                    */
-/*----------------------------------------------------------------------------*/
-
-/**
-  * @brief  Create main menu
-  * @retval None
-  */
-static void CreateMainMenu(void)
-{
-  Menu_t* menu = &menuStack[menuDepth];
-  
-  menu->title = "Main Menu";
-  menu->numItems = 0;
-  menu->currentItem = 0;
-  menu->scrollPosition = 0;
-  
-  // Add menu items
-  menu->items[menu->numItems].name = "Crossover";
-  menu->items[menu->numItems].callback = ShowCrossoverMenu;
-  menu->items[menu->numItems].parameter = NULL;
-  menu->numItems++;
-  
-  menu->items[menu->numItems].name = "Compressor";
-  menu->items[menu->numItems].callback = ShowCompressorMenu;
-  menu->items[menu->numItems].parameter = NULL;
-  menu->numItems++;
-  
-  menu->items[menu->numItems].name = "Limiter";
-  menu->items[menu->numItems].callback = ShowLimiterMenu;
-  menu->items[menu->numItems].parameter = NULL;
-  menu->numItems++;
-  
-  menu->items[menu->numItems].name = "Delay/Phase";
-  menu->items[menu->numItems].callback = ShowDelayMenu;
-  menu->items[menu->numItems].parameter = NULL;
-  menu->numItems++;
-  
-  menu->items[menu->numItems].name = "Presets";
-  menu->items[menu->numItems].callback = ShowPresetsMenu;
-  menu->items[menu->numItems].parameter = NULL;
-  menu->numItems++;
-  
-  menu->items[menu->numItems].name = "System";
-  menu->items[menu->numItems].callback = ShowSystemMenu;
-  menu->items[menu->numItems].parameter = NULL;
-  menu->numItems++;
-}
-
-/**
-  * @brief  Create crossover menu
-  * @retval None
-  */
-static void CreateCrossoverMenu(void)
-{
-  Menu_t* menu = &menuStack[menuDepth];
-  
-  menu->title = "Crossover";
-  menu->numItems = 0;
-  menu->currentItem = 0;
-  menu->scrollPosition = 0;
-  
-  // Add menu items for each band
-  menu->items[menu->numItems].name = "Sub Band";
-  menu->items[menu->numItems].callback = ShowCrossoverBandMenu;
-  menu->items[menu->numItems].parameter = (void*)CROSSOVER_BAND_SUB;
-  menu->numItems++;
-  
-  menu->items[menu->numItems].name = "Low Band";
-  menu->items[menu->numItems].callback = ShowCrossoverBandMenu;
-  menu->items[menu->numItems].parameter = (void*)CROSSOVER_BAND_LOW;
-  menu->numItems++;
-  
-  menu->items[menu->numItems].name = "Mid Band";
-  menu->items[menu->numItems].callback = ShowCrossoverBandMenu;
-  menu->items[menu->numItems].parameter = (void*)CROSSOVER_BAND_MID;
-  menu->numItems++;
-  
-  menu->items[menu->numItems].name = "High Band";
-  menu->items[menu->numItems].callback = ShowCrossoverBandMenu;
-  menu->items[menu->numItems].parameter = (void*)CROSSOVER_BAND_HIGH;
-  menu->numItems++;
-  
-  menu->items[menu->numItems].name = "Filter Type";
-  menu->items[menu->numItems].callback = NULL;
-  menu->items[menu->numItems].parameter = &Crossover_GetSettings()->filterType;
-  menu->items[menu->numItems].minValue = 0;
-  menu->items[menu->numItems].maxValue = 1; // 0=Butterworth, 1=Linkwitz-Riley
-  menu->items[menu->numItems].step = 1;
-  menu->items[menu->numItems].unit = NULL;
-  menu->items[menu->numItems].decimalPlaces = 0;
-  menu->numItems++;
-}
-
-/**
-  * @brief  Create crossover band menu
-  * @param  band: Band index (0=Sub, 1=Low, 2=Mid, 3=High)
-  * @retval None
-  */
-static void CreateCrossoverBandMenu(uint8_t band)
-{
-  Menu_t* menu = &menuStack[menuDepth];
-  CrossoverSettings_t* settings = Crossover_GetSettings();
-  char bandNames[4][10] = {"Sub", "Low", "Mid", "High"};
-  
-  // Create menu title with band name
-  static char title[20];
-  sprintf(title, "%s Band", bandNames[band]);
-  menu->title = title;
-  
-  menu->numItems = 0;
-  menu->currentItem = 0;
-  menu->scrollPosition = 0;
-  
-  // Add menu items based on band
-  if (band == CROSSOVER_BAND_SUB) {
-    // Sub band only has high cutoff
-    menu->items[menu->numItems].name = "High Cutoff";
-    menu->items[menu->numItems].callback = NULL;
-    menu->items[menu->numItems].parameter = &settings->bands[band].highCutoff;
-    menu->items[menu->numItems].minValue = 20.0f;
-    menu->items[menu->numItems].maxValue = 200.0f;
-    menu->items[menu->numItems].step = 1.0f;
-    menu->items[menu->numItems].unit = "Hz";
-    menu->items[menu->numItems].decimalPlaces = 0;
-    menu->numItems++;
-  } else if (band == CROSSOVER_BAND_HIGH) {
-    // High band only has low cutoff
-    menu->items[menu->numItems].name = "Low Cutoff";
-    menu->items[menu->numItems].callback = NULL;
-    menu->items[menu->numItems].parameter = &settings->bands[band].lowCutoff;
-    menu->items[menu->numItems].minValue = 2000.0f;
-    menu->items[menu->numItems].maxValue = 20000.0f;
-    menu->items[menu->numItems].step = 100.0f;
-    menu->items[menu->numItems].unit = "Hz";
-    menu->items[menu->numItems].decimalPlaces = 0;
-    menu->numItems++;
-  } else {
-    // Mid bands have both low and high cutoff
-    menu->items[menu->numItems].name = "Low Cutoff";
-    menu->items[menu->numItems].callback = NULL;
-    menu->items[menu->numItems].parameter = &settings->bands[band].lowCutoff;
-    menu->items[menu->numItems].minValue = (band == CROSSOVER_BAND_LOW) ? 100.0f : 500.0f;
-    menu->items[menu->numItems].maxValue = (band == CROSSOVER_BAND_LOW) ? 1000.0f : 4000.0f;
-    menu->items[menu->numItems].step = (band == CROSSOVER_BAND_LOW) ? 10.0f : 50.0f;
-    menu->items[menu->numItems].unit = "Hz";
-    menu->items[menu->numItems].decimalPlaces = 0;
-    menu->numItems++;
+    /* Save confirmation action */
+    confirmationAction = action;
+    confirmationOption = CONFIRM_YES;
     
-    menu->items[menu->numItems].name = "High Cutoff";
-    menu->items[menu->numItems].callback = NULL;
-    menu->items[menu->numItems].parameter = &settings->bands[band].highCutoff;
-    menu->items[menu->numItems].minValue = (band == CROSSOVER_BAND_LOW) ? 200.0f : 2000.0f;
-    menu->items[menu->numItems].maxValue = (band == CROSSOVER_BAND_LOW) ? 2000.0f : 8000.0f;
-    menu->items[menu->numItems].step = (band == CROSSOVER_BAND_LOW) ? 50.0f : 100.0f;
-    menu->items[menu->numItems].unit = "Hz";
-    menu->items[menu->numItems].decimalPlaces = 0;
-    menu->numItems++;
-  }
-  
-  // All bands have gain
-  menu->items[menu->numItems].name = "Gain";
-  menu->items[menu->numItems].callback = NULL;
-  menu->items[menu->numItems].parameter = &settings->bands[band].gain;
-  menu->items[menu->numItems].minValue = -20.0f;
-  menu->items[menu->numItems].maxValue = 20.0f;
-  menu->items[menu->numItems].step = 0.5f;
-  menu->items[menu->numItems].unit = "dB";
-  menu->items[menu->numItems].decimalPlaces = 1;
-  menu->numItems++;
-  
-  // All bands have mute option
-  menu->items[menu->numItems].name = "Mute";
-  menu->items[menu->numItems].callback = NULL;
-  menu->items[menu->numItems].parameter = &settings->bands[band].mute;
-  menu->items[menu->numItems].minValue = 0.0f;
-  menu->items[menu->numItems].maxValue = 1.0f;
-  menu->items[menu->numItems].step = 1.0f;
-  menu->items[menu->numItems].unit = NULL;
-  menu->items[menu->numItems].decimalPlaces = 0;
-  menu->numItems++;
+    /* Switch to confirmation state */
+    menuState = MENU_STATE_CONFIRMATION;
+    
+    /* Display confirmation dialog */
+    LCD_Clear();
+    LCD_SetCursor(0, 0);
+    LCD_Print(message);
+    LCD_SetCursor(0, 1);
+    LCD_Print("> Yes   No    ");
 }
 
 /**
-  * @brief  Create compressor menu
+  * @brief  Handle confirmation result
   * @retval None
   */
-static void CreateCompressorMenu(void)
+static void HandleConfirmation(void)
 {
-  Menu_t* menu = &menuStack[menuDepth];
-  CompressorSettings_t* settings = Compressor_GetSettings();
-  
-  menu->title = "Compressor";
-  menu->numItems = 0;
-  menu->currentItem = 0;
-  menu->scrollPosition = 0;
-  
-  // Add menu items
-  menu->items[menu->numItems].name = "Enabled";
-  menu->items[menu->numItems].callback = NULL;
-  menu->items[menu->numItems].parameter = &settings->enabled;
-  menu->items[menu->numItems].minValue = 0.0f;
-  menu->items[menu->numItems].maxValue = 1.0f;
-  menu->items[menu->numItems].step = 1.0f;
-  menu->items[menu->numItems].unit = NULL;
-  menu->items[menu->numItems].decimalPlaces = 0;
-  menu->numItems++;
-  
-  menu->items[menu->numItems].name = "Threshold";
-  menu->items[menu->numItems].callback = NULL;
-  menu->items[menu->numItems].parameter = &settings->threshold;
-  menu->items[menu->numItems].minValue = -60.0f;
-  menu->items[menu->numItems].maxValue = 0.0f;
-  menu->items[menu->numItems].step = 0.5f;
-  menu->items[menu->numItems].unit = "dB";
-  menu->items[menu->numItems].decimalPlaces = 1;
-  menu->numItems++;
-  
-  menu->items[menu->numItems].name = "Ratio";
-  menu->items[menu->numItems].callback = NULL;
-  menu->items[menu->numItems].parameter = &settings->ratio;
-  menu->items[menu->numItems].minValue = 1.0f;
-  menu->items[menu->numItems].maxValue = 20.0f;
-  menu->items[menu->numItems].step = 0.1f;
-  menu->items[menu->numItems].unit = ":1";
-  menu->items[menu->numItems].decimalPlaces = 1;
-  menu->numItems++;
-  
-  menu->items[menu->numItems].name = "Attack";
-  menu->items[menu->numItems].callback = NULL;
-  menu->items[menu->numItems].parameter = &settings->attack;
-  menu->items[menu->numItems].minValue = 0.1f;
-  menu->items[menu->numItems].maxValue = 100.0f;
-  menu->items[menu->numItems].step = 0.1f;
-  menu->items[menu->numItems].unit = "ms";
-  menu->items[menu->numItems].decimalPlaces = 1;
-  menu->numItems++;
-  
-  menu->items[menu->numItems].name = "Release";
-  menu->items[menu->numItems].callback = NULL;
-  menu->items[menu->numItems].parameter = &settings->release;
-  menu->items[menu->numItems].minValue = 10.0f;
-  menu->items[menu->numItems].maxValue = 1000.0f;
-  menu->items[menu->numItems].step = 10.0f;
-  menu->items[menu->numItems].unit = "ms";
-  menu->items[menu->numItems].decimalPlaces = 0;
-  menu->numItems++;
-  
-  menu->items[menu->numItems].name = "Makeup Gain";
-  menu->items[menu->numItems].callback = NULL;
-  menu->items[menu->numItems].parameter = &settings->makeupGain;
-  menu->items[menu->numItems].minValue = 0.0f;
-  menu->items[menu->numItems].maxValue = 20.0f;
-  menu->items[menu->numItems].step = 0.5f;
+    /* Process based on confirmation result */
+    if (confirmationOption == CONFIRM_YES) {
+        /* Handle based on action */
+        switch (confirmationAction) {
+            case CONFIRM_ACTION_SAVE_PRESET:
+                /* Save current settings to selected preset */
+                PresetManager_SaveUserPreset(selectedPreset);
+                break;
+                
+            case CONFIRM_ACTION_LOAD_PRESET:
+                /* Load selected preset */
+                if (selectedPreset < 5) {
+                    /* Factory preset */
+                    FactoryPresets_Load(selectedPreset);
+                } else {
+                    /* User preset */
+                    PresetManager_LoadUserPreset(selectedPreset - 5);
+                }
+                break;
+                
+            default:
+                /* Unknown action */
+                break;
+        }
+    }
+}
+
+/**
+  * @brief  Update crossover parameter
+  * @param  band: Band index
+  * @param  paramId: Parameter ID
+  * @param  value: New parameter value
+  * @retval None
+  */
+static void UpdateCrossoverParameter(uint8_t band, uint8_t paramId, int32_t value)
+{
+    /* Update parameter based on ID */
+    switch (paramId) {
+        case PARAM_CROSSOVER_FREQUENCY:
+            Crossover_SetFrequency(band, value);
+            break;
+            
+        case PARAM_CROSSOVER_TYPE:
+            Crossover_SetFilterType(band, value);
+            break;
+            
+        case PARAM_CROSSOVER_GAIN:
+            Crossover_SetGain(band, value);
+            break;
+            
+        case PARAM_CROSSOVER_MUTE:
+            Crossover_SetMute(band, value);
+            break;
+            
+        default:
+            /* Unknown parameter */
+            break;
+    }
+}
+
+/**
+  * @brief  Update compressor parameter
+  * @param  band: Not used for compressor (global)
+  * @param  paramId: Parameter ID
+  * @param  value: New parameter value
+  * @retval None
+  */
+static void UpdateCompressorParameter(uint8_t band, uint8_t paramId, int32_t value)
+{
+    /* Update parameter based on ID */
+    switch (paramId) {
+        case PARAM_COMPRESSOR_THRESHOLD:
+            Compressor_SetThreshold(value);
+            break;
+            
+        case PARAM_COMPRESSOR_RATIO:
+            Compressor_SetRatio(value);
+            break;
+            
+        case PARAM_COMPRESSOR_ATTACK:
+            Compressor_SetAttack(value);
+            break;
+            
+        case PARAM_COMPRESSOR_RELEASE:
+            Compressor_SetRelease(value);
+            break;
+            
+        case PARAM_COMPRESSOR_MAKEUP:
+            Compressor_SetMakeupGain(value);
+            break;
+            
+        default:
+            /* Unknown parameter */
+            break;
+    }
+}
+
+/**
+  * @brief  Update limiter parameter
+  * @param  band: Not used for limiter (global)
+  * @param  paramId: Parameter ID
+  * @param  value: New parameter value
+  * @retval None
+  */
+static void UpdateLimiterParameter(uint8_t band, uint8_t paramId, int32_t value)
+{
+    /* Update parameter based on ID */
+    switch (paramId) {
+        case PARAM_LIMITER_THRESHOLD:
+            Limiter_SetThreshold(value);
+            break;
+            
+        case PARAM_LIMITER_RELEASE:
+            Limiter_SetRelease(value);
+            break;
+            
+        default:
+            /* Unknown parameter */
+            break;
+    }
+}
+
+/**
+  * @brief  Update delay parameter
+  * @param  band: Band index
+  * @param  paramId: Parameter ID
+  * @param  value: New parameter value
+  * @retval None
+  */
+static void UpdateDelayParameter(uint8_t band, uint8_t paramId, int32_t value)
+{
+    /* Update parameter based on ID */
+    switch (paramId) {
+        case PARAM_DELAY_TIME:
+            Delay_SetTime(band, value);
+            break;
+            
+        default:
+            /* Unknown parameter */
+            break;
+    }
+}
+
+/**
+  * @brief  Update phase parameter
+  * @param  band: Band index
+  * @param  paramId: Parameter ID
+  * @param  value: New parameter value
+  * @retval None
+  */
+static void UpdatePhaseParameter(uint8_t band, uint8_t paramId, int32_t value)
+{
+    /* Update parameter based on ID */
+    switch (paramId) {
+        case PARAM_PHASE_INVERT:
+            Delay_SetPhaseInvert(band, value);
+            break;
+            
+        default:
+            /* Unknown parameter */
+            break;
+    }
+}
+
+/* End of file */
