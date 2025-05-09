@@ -1,0 +1,209 @@
+# Daftar Komponen dan Rangkaian Dasar
+
+## Komponen Utama
+
+| No. | Komponen | Jumlah | Spesifikasi | Fungsi |
+|-----|----------|--------|-------------|--------|
+| 1 | STM32F411CEU6 | 1 | MCU 100MHz, 512KB Flash, 128KB RAM | Mikrokontroler utama |
+| 2 | PCM1808 | 1 | 24-bit ADC Stereo | Konversi audio analog ke digital |
+| 3 | PCM5102A | 1 | 24-bit DAC Stereo | Konversi audio digital ke analog |
+| 4 | LCD 16x2 | 1 | HD44780 compatible, I2C | Antarmuka pengguna |
+| 5 | Rotary Encoder | 1 | Dengan push button | Kontrol navigasi menu |
+| 6 | Pushbutton | 3-5 | Tactile switch | Tombol tambahan untuk kontrol cepat |
+| 7 | PCF8574 | 1 | I2C I/O Expander (opsional) | Interface LCD I2C |
+| 8 | 24LC256 | 1 | 256Kbit EEPROM I2C | Penyimpanan preset audio |
+| 9 | Op-amp TL072/NE5532 | 4-8 | Dual Op-amp | Buffer analog dan penguat |
+| 10 | Crystal Oscillator | 1 | 8MHz/12MHz | Sumber clock eksternal |
+
+## Komponen Pasif
+
+| No. | Komponen | Jumlah | Spesifikasi | Fungsi |
+|-----|----------|--------|-------------|--------|
+| 1 | Resistor 10kΩ | 10 | 1/4W, Tolerance 1% | Pull-up, pembagi tegangan |
+| 2 | Resistor 4.7kΩ | 4 | 1/4W, Tolerance 1% | I2C pull-up |
+| 3 | Resistor 330Ω | 8 | 1/4W, Tolerance 5% | LED current limiting |
+| 4 | Resistor 100Ω | 4 | 1/4W, Tolerance 1% | Buffer output protection |
+| 5 | Kapasitor 22pF | 2 | Ceramic | Crystal oscillator |
+| 6 | Kapasitor 100nF | 20 | Ceramic | Decoupling/bypass |
+| 7 | Kapasitor 10µF | 8 | Elektrolit/Tantalum | Power supply filtering |
+| 8 | Kapasitor 47µF | 4 | Elektrolit | Filter analog |
+| 9 | Kapasitor 1µF | 8 | Film/Ceramic | Coupling audio |
+| 10 | LED | 4 | 3mm, berbagai warna | Indikator status |
+
+## Konektor dan Miscellaneous
+
+| No. | Komponen | Jumlah | Spesifikasi | Fungsi |
+|-----|----------|--------|-------------|--------|
+| 1 | Jack Audio 3.5mm | 2 | Stereo TRS | Input/Output Audio |
+| 2 | Header Pin 2.54mm | 40 | Male/Female | Konektor antar board |
+| 3 | Jumper | 10 | 2.54mm | Konfigurasi opsi |
+| 4 | Pin Header 2x5 | 1 | 2.54mm | Konektor programmer |
+| 5 | PCB | 1 | 2-layer, min. 10x10cm | Board utama |
+| 6 | Kabel Jumper | 20 | Female-Female | Koneksi antar modul |
+| 7 | USB to TTL Converter | 1 | CH340/CP2102/FTDI | Programming/debugging |
+| 8 | ST-Link V2 | 1 | STM32 Programmer | Upload firmware |
+
+## Catu Daya
+
+| No. | Komponen | Jumlah | Spesifikasi | Fungsi |
+|-----|----------|--------|-------------|--------|
+| 1 | Regulator LM1117-3.3V | 1 | TO-220 package | Regulasi 3.3V untuk digital |
+| 2 | Regulator LM7805 | 1 | TO-220 package | Regulasi 5V untuk analog |
+| 3 | Jack DC | 1 | 5.5mm x 2.1mm | Input catu daya |
+| 4 | Kapasitor 470µF | 2 | Elektrolit 25V | Filter catu daya |
+| 5 | Dioda 1N4007 | 2 | 1A | Proteksi polaritas |
+
+## Rangkaian Dasar
+
+### 1. Rangkaian Catu Daya
+```
+         D1                 C1        LM7805        C3
+AC/DC   +---+      +--------||--------+-----+-------||--------+------- +5V
+12V In --+   +------+                 |     |       |         |
+                    |                 |     |       |         |
+                    |                 |     |       |         |
+                    +------+----------+     +-------+         |
+                           |                                  |
+                           |                                  |
+                          GND                                GND
+
+
+                                      C2        LM1117       C4
+                           +--------||--------+-----+-------||--------+------- +3.3V
+                           |                  |     |       |         |
+                           |                  |     |       |         |
+            +5V ------------+                 |     |       |         |
+                           |                  |     |       |         |
+                           |                  |     |       |         |
+                           +------+-----------+     +-------+         |
+                                  |                                   |
+                                  |                                   |
+                                 GND                                 GND
+```
+
+### 2. Koneksi STM32F411 dengan LCD 16x2 via I2C
+```
+          STM32F411                          PCF8574                     LCD 16x2
+          +------+                          +------+                    +------+
+          |      |                          |      |                    |      |
+          |  PB6 |---- SCL -------------+---|SCL   |                    |      |
+          |      |                      |   |      |---- D4-D7 ---------|D4-D7 |
+          |  PB7 |---- SDA -------------+---|SDA   |                    |      |
+          |      |                      |   |      |---- RS ------------|RS    |
+          |      |                      |   |      |                    |      |
+          |      |                      |   |      |---- RW ------------|RW    |
+          |      |                      |   |      |                    |      |
+          |      |                      |   |      |---- E  ------------|E     |
+          |      |                      |   |      |                    |      |
+          |      |                      |   |      |---- BL ------------|BL    |
+          +------+                      |   +------+                    +------+
+                                        |
+                                        |
+                           +---PULL-UP--+
+                           |
+                          R1
+                       4.7kΩ
+                           |
+                          +5V
+```
+
+### 3. Koneksi STM32F411 dengan PCM1808 (ADC Audio)
+```
+          STM32F411                                           PCM1808
+          +------+                                           +------+
+          |      |                                           |      |
+          |  PB3 |---- I2S3_CK (SCLK) ------------------+---|SCK   |
+          |      |                                      |   |      |
+          |  PA4 |---- I2S3_WS (LRCK) ------------------+---|LRCK  |
+          |      |                                      |   |      |
+          |  PB5 |---- I2S3_SD (MISO) <-----------------+---|DOUT  |
+          |      |                                      |   |      |
+          | PA15 |---- GPIO OUT (FORMAT) -------------------|FMT   |
+          |      |                                      |   |      |
+          |  PB4 |---- GPIO OUT (SYSTEM CLK) ---------------|SCKI  |
+          +------+                                      |   +------+
+                                                        |
+                                Analog Audio Input      |
+                                     +-----+            |
+                                     |     |            |
+                                     +  L  +------------+
+                                     |     |
+                                     +-----+
+                                     |     |
+                                     +  R  +
+                                     |     |
+                                     +-----+
+```
+
+### 4. Koneksi STM32F411 dengan PCM5102A (DAC Audio)
+```
+          STM32F411                                           PCM5102A
+          +------+                                           +------+
+          |      |                                           |      |
+          |  PB13|---- I2S2_CK (BCLK) ------------------+---|BCK   |
+          |      |                                      |   |      |
+          |  PB12|---- I2S2_WS (LRCK) ------------------+---|LRCK  |
+          |      |                                      |   |      |
+          |  PB15|---- I2S2_SD (MOSI) -----------------+---|DIN   |
+          |      |                                      |   |      |
+          |  PC6 |---- GPIO OUT (MUTE) ----------------+---|XSMT  |
+          +------+                                      |   +------+
+                                                        |
+                                Analog Audio Output     |
+                                     +-----+            |
+                                     |     |            |
+                                     +  L  +------------+
+                                     |     |
+                                     +-----+
+                                     |     |
+                                     +  R  +
+                                     |     |
+                                     +-----+
+```
+
+### 5. Koneksi STM32F411 dengan Rotary Encoder
+```
+          STM32F411                                           Rotary Encoder
+          +------+                                           +------+
+          |      |                                           |      |
+          |  PC10|---- GPIO IN (CLK) -------------------+---|A     |
+          |      |                R1                    |   |      |
+          |  PC11|---- GPIO IN (DT) ----+--PULL-UP--+--+---|B     |
+          |      |                      |           |  |   |      |
+          |  PC12|---- GPIO IN (SW) ----+           |  +---|SW    |
+          |      |                                  |      |      |
+          +------+                                  |      +------+
+                                                   R2
+                                                  10kΩ
+                                                   |
+                                                  +3.3V
+```
+
+## Catatan Penting untuk Rangkaian
+
+1. **Pemisahan Ground**: Disarankan untuk memisahkan ground analog dan digital untuk meminimalkan noise:
+   - AGND: Ground untuk rangkaian analog (ADC, DAC, Op-amp)
+   - DGND: Ground untuk rangkaian digital (STM32, LCD, Encoder)
+   - Hubungkan keduanya di satu titik utama (star ground)
+
+2. **Power Supply Noise Filtering**:
+   - Tambahkan kapasitor 100nF dekat setiap IC untuk mengurangi noise catu daya
+   - Gunakan kapasitor 10μF dan 100nF paralel di input regulator
+
+3. **Proteksi Input/Output Audio**:
+   - Gunakan kapasitor kopling 1μF untuk memblokir DC offset
+   - Tambahkan resistor seri 100Ω di jalur output untuk proteksi
+
+4. **Kristal Oscillator**:
+   - Pasang crystal 8MHz dengan kapasitor 22pF ke ground pada kedua pin
+   - Tempatkan crystal dekat dengan STM32F411 untuk stabilitas
+
+5. **Koneksi Programming/Debug**:
+   - Siapkan header 2x5 untuk koneksi SWD (SWDIO, SWCLK, RST, V3.3, GND)
+   - Tambahkan tombol reset terhubung ke pin NRST STM32
+
+6. **Pertimbangan EMI/EMC**:
+   - Pertahankan jalur I2S sependek mungkin
+   - Hindari crossing antara sinyal analog dan digital
+   - Pertimbangkan penambahan ferrite bead pada catu daya analog
+   - Gunakan ground plane yang solid
